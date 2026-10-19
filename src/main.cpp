@@ -22,7 +22,7 @@
 #include "imgui.h"
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx11.h"
-#include "json.hpp"
+#include <nlohmann/json.hpp>
 #pragma comment(lib,"d3d11.lib")
 using json=nlohmann::json;
 struct Skin {std::string weapon,name,collection,variant; int level=1; bool favorite=false; std::string uuid,image; std::vector<std::string> variants; int maxLevel=1; bool applied=false;};
