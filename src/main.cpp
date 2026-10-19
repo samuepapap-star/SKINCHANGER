@@ -29,12 +29,18 @@
 #pragma comment(lib,"d3d11.lib")
 using json=nlohmann::json;
 struct Skin {std::string weapon,name,collection,variant; int level=1; bool favorite=false; std::string uuid,image; std::vector<std::string> variants; int maxLevel=1; bool applied=false;};
-static std::string FetchCatalog(){std::string out; HINTERNET session=WinHttpOpen(L"VSkinPremium/2.0",WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,WINHTTP_NO_PROXY_NAME,WINHTTP_NO_PROXY_BYPASS,0);if(!session)return out; HINTERNET connect=WinHttpConnect(session,L"valorant-api.com",INTERNET_DEFAULT_HTTPS_PORT,0);if(connect){HINTERNET request=WinHttpOpenRequest(connect,L"GET",L"/v1/weapons?language=en-US",nullptr,WINHTTP_NO_REFERER,WINHTTP_DEFAULT_ACCEPT_TYPES,WINHTTP_FLAG_SECURE);if(request){DWORD timeout=10000;WinHttpSetTimeouts(request,timeout,timeout,timeout,timeout);if(WinHttpSendRequest(request,WINHTTP_NO_ADDITIONAL_HEADERS,0,WINHTTP_NO_REQUEST_DATA,0,0,0)&&WinHttpReceiveResponse(request,nullptr)){DWORD status=0,len=sizeof(status);WinHttpQueryHeaders(request,WINHTTP_QUERY_STATUS_CODE|WINHTTP_QUERY_FLAG_NUMBER,WINHTTP_HEADER_NAME_BY_INDEX,&status,&len,WINHTTP_NO_HEADER_INDEX);if(status==200){char buffer[8192];DWORD read=0;while(WinHttpReadData(request,buffer,sizeof(buffer),&read)&&read){if(out.size()+read>12*1024*1024){out.clear();break;}out.append(buffer,read);}}}WinHttpCloseHandle(request);}WinHttpCloseHandle(connect);}WinHttpCloseHandle(session);return out;}
-static std::vector<Skin> ParseCatalog(const std::string& raw){std::vector<Skin> result;try{auto root=json::parse(raw);if(!root.contains("data")||!root["data"].is_array())return result;for(const auto& w:root["data"]){if(!w.is_object())continue;std::string weapon=w.value("displayName",std::string());if(weapon=="Melee")weapon="Melee";if(!w.contains("skins")||!w["skins"].is_array())continue;for(const auto& item:w["skins"]){if(!item.is_object())continue;Skin skin;skin.weapon=weapon;skin.name=item.value("displayName",std::string());skin.uuid=item.value("uuid",std::string());skin.image=item.value("displayIcon",std::string());skin.collection=skin.name;skin.variant="Default";if(item.contains("chromas")&&item["chromas"].is_array()){for(const auto& chroma:item["chromas"]){if(chroma.is_object())skin.variants.push_back(chroma.value("displayName",std::string("Default")));}}if(skin.variants.empty())skin.variants.push_back("Default");if(item.contains("levels")&&item["levels"].is_array())skin.maxLevel=std::max(1,(int)item["levels"].size());if(!skin.uuid.empty()&&!skin.name.empty()){
+static std::string catalogError;
+static std::string FetchCatalog(){catalogError="Catalog download failed";std::string out; HINTERNET session=WinHttpOpen(L"VSkinPremium/2.0",WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,WINHTTP_NO_PROXY_NAME,WINHTTP_NO_PROXY_BYPASS,0);if(!session){catalogError="WinHttpOpen error "+std::to_string(GetLastError());return out;} HINTERNET connect=WinHttpConnect(session,L"valorant-api.com",INTERNET_DEFAULT_HTTPS_PORT,0);if(connect){HINTERNET request=WinHttpOpenRequest(connect,L"GET",L"/v1/weapons?language=en-US",nullptr,WINHTTP_NO_REFERER,WINHTTP_DEFAULT_ACCEPT_TYPES,WINHTTP_FLAG_SECURE);if(request){DWORD timeout=10000;WinHttpSetTimeouts(request,timeout,timeout,timeout,timeout);if(WinHttpSendRequest(request,WINHTTP_NO_ADDITIONAL_HEADERS,0,WINHTTP_NO_REQUEST_DATA,0,0,0)&&WinHttpReceiveResponse(request,nullptr)){DWORD status=0,len=sizeof(status);WinHttpQueryHeaders(request,WINHTTP_QUERY_STATUS_CODE|WINHTTP_QUERY_FLAG_NUMBER,WINHTTP_HEADER_NAME_BY_INDEX,&status,&len,WINHTTP_NO_HEADER_INDEX);if(status!=200)catalogError="Catalog HTTP "+std::to_string(status);if(status==200){char buffer[8192];DWORD read=0;while(WinHttpReadData(request,buffer,sizeof(buffer),&read)&&read){if(out.size()+read>32*1024*1024){out.clear();catalogError="Catalog exceeds 32 MB";break;}out.append(buffer,read);}}else if(catalogError=="Catalog download failed")catalogError="WinHTTP request error "+std::to_string(GetLastError());}else catalogError="WinHTTP send/receive error "+std::to_string(GetLastError());WinHttpCloseHandle(request);}else catalogError="WinHttpOpenRequest error "+std::to_string(GetLastError());WinHttpCloseHandle(connect);}else catalogError="WinHttpConnect error "+std::to_string(GetLastError());WinHttpCloseHandle(session);if(!out.empty())catalogError.clear();return out;}
+static std::string JsonString(const json& obj,const char* key,const std::string& fallback=""){
+ if(!obj.is_object())return fallback;
+ auto it=obj.find(key);
+ return it!=obj.end()&&it->is_string()?it->get<std::string>():fallback;
+}
+static std::vector<Skin> ParseCatalog(const std::string& raw){std::vector<Skin> result;try{if(raw.empty()){catalogError="Catalog response is empty";return result;}auto root=json::parse(raw);if(!root.is_object()||!root.contains("data")||!root["data"].is_array()){catalogError="Catalog JSON missing data array";return result;}for(const auto& w:root["data"]){if(!w.is_object())continue;std::string weapon=JsonString(w,"displayName");if(weapon=="Melee")weapon="Melee";if(!w.contains("skins")||!w["skins"].is_array())continue;for(const auto& item:w["skins"]){if(!item.is_object())continue;Skin skin;skin.weapon=weapon;skin.name=JsonString(item,"displayName");skin.uuid=JsonString(item,"uuid");skin.image=JsonString(item,"displayIcon");if(skin.image.empty()&&item.contains("chromas")&&item["chromas"].is_array()){for(const auto& ch:item["chromas"]){skin.image=JsonString(ch,"fullRender");if(skin.image.empty())skin.image=JsonString(ch,"displayIcon");if(!skin.image.empty())break;}}skin.collection=skin.name;skin.variant="Default";if(item.contains("chromas")&&item["chromas"].is_array()){for(const auto& chroma:item["chromas"]){if(chroma.is_object())skin.variants.push_back(JsonString(chroma,"displayName", "Default"));}}if(skin.variants.empty())skin.variants.push_back("Default");if(item.contains("levels")&&item["levels"].is_array())skin.maxLevel=std::max(1,(int)item["levels"].size());if(!skin.uuid.empty()&&!skin.name.empty()){
  auto pos=skin.name.rfind(' ' + weapon);
  if(pos!=std::string::npos && pos>0) skin.collection=skin.name.substr(0,pos);
  else if(skin.name=="Standard " + weapon || skin.name=="Random Favorite Skin") skin.collection="Standard";
- result.push_back(std::move(skin));}}}}catch(...){result.clear();}return result;}
+ result.push_back(std::move(skin));}}}}catch(const json::exception& e){catalogError=std::string("Catalog JSON parse error: ")+e.what();result.clear();}catch(const std::exception& e){catalogError=std::string("Catalog parse error: ")+e.what();result.clear();}if(result.empty()&&catalogError.empty())catalogError="Catalog contains no usable skins";return result;}
 // Official artwork is downloaded on demand from the public catalog; never touches the game.
 static std::vector<unsigned char> FetchImage(const std::string& url){
  std::vector<unsigned char> bytes; const std::string prefix="https://media.valorant-api.com/";
@@ -52,6 +58,23 @@ static std::vector<unsigned char> FetchImage(const std::string& url){
  WinHttpCloseHandle(r);}WinHttpCloseHandle(c);}WinHttpCloseHandle(h);return bytes;
 }
 static std::unordered_map<std::string,ID3D11ShaderResourceView*> textures;
+static std::mutex artworkMutex;
+static std::vector<std::pair<std::string,std::vector<unsigned char>>> artworkReady;
+static std::unordered_set<std::string> artworkRequested;
+static std::atomic<bool> artworkBusy{false};
+static void RequestArtwork(const Skin& skin){
+ if(skin.uuid.empty()||skin.image.empty()||textures.contains(skin.uuid)||artworkRequested.contains(skin.uuid)||artworkBusy.load())return;
+ artworkRequested.insert(skin.uuid);artworkBusy=true;
+ std::string id=skin.uuid,url=skin.image;
+ std::thread([id,url](){auto bytes=FetchImage(url);{std::lock_guard<std::mutex> lock(artworkMutex);artworkReady.emplace_back(id,std::move(bytes));}artworkBusy=false;}).detach();
+}
+static ID3D11ShaderResourceView* DecodeTexture(const std::vector<unsigned char>& data);
+static void FlushArtwork(){
+ std::vector<std::pair<std::string,std::vector<unsigned char>>> ready;
+ {std::lock_guard<std::mutex> lock(artworkMutex);ready.swap(artworkReady);}
+ for(auto& entry:ready){if(entry.second.empty())continue;auto* view=DecodeTexture(entry.second);if(view){if(textures.size()>=96){auto it=textures.begin();if(it->second)it->second->Release();textures.erase(it);}textures[entry.first]=view;}}
+}
+
 static ID3D11Device* device=nullptr; static ID3D11DeviceContext* context=nullptr; static IDXGISwapChain* swapchain=nullptr; static ID3D11RenderTargetView* target=nullptr;
 static ID3D11ShaderResourceView* DecodeTexture(const std::vector<unsigned char>& data){
  if(data.empty()||!device)return nullptr;
@@ -83,9 +106,9 @@ struct App {
  std::vector<Skin> skins;std::vector<std::string> logs;std::string page="Dashboard";std::string selectedUuid;char search[128]={};int weaponFilter=0;int selected=0;bool vsync=true;float scale=1.0f;float transition=0;std::string toast;float toastTimer=0;std::string imageUuid;bool imageAttempted=false;
  const std::vector<std::string> weapons={"All","Vandal","Phantom","Operator","Sheriff","Ghost","Classic","Spectre","Guardian","Bulldog","Melee","Ares","Odin","Marshal","Outlaw","Bucky","Judge","Frenzy","Stinger","Shorty"};
  App(){const std::vector<std::pair<std::string,std::string>> names={{"Vandal","Prime"},{"Vandal","Reaver"},{"Vandal","RGX 11z Pro"},{"Phantom","Oni"},{"Phantom","Spectrum"},{"Operator","Elderflame"},{"Sheriff","Ion"},{"Ghost","Sovereign"},{"Classic","Glitchpop"},{"Spectre","Protocol 781-A"},{"Guardian","Ruination"},{"Bulldog","Araxys"},{"Melee","Champions Blade"}};for(auto& [w,n]:names)skins.push_back({w,n,n,"Default",1,false});RefreshCatalog(false);Load();Log("Application initialized");}
- void RefreshCatalog(bool network){auto path=ConfigPath().parent_path()/"catalog-cache.json";std::string raw;if(network){raw=FetchCatalog();if(!raw.empty()){std::ofstream file(path,std::ios::binary);file<<raw;}}else{std::ifstream file(path,std::ios::binary);if(file)raw.assign(std::istreambuf_iterator<char>(file),{});}auto parsed=ParseCatalog(raw);if(!parsed.empty()){imageUuid.clear();imageAttempted=false;std::unordered_set<std::string> favorite,applied;for(auto& old:skins){if(old.favorite)favorite.insert(old.uuid);if(old.applied)applied.insert(old.uuid);}skins=std::move(parsed);for(auto& skin:skins){skin.favorite=favorite.contains(skin.uuid);skin.applied=applied.contains(skin.uuid);}selected=0;
+ void RefreshCatalog(bool network){auto path=ConfigPath().parent_path()/"catalog-cache.json";std::string raw;if(network){raw=FetchCatalog();}else{std::ifstream file(path,std::ios::binary);if(file)raw.assign(std::istreambuf_iterator<char>(file),{});}const std::string downloadError=catalogError;catalogError.clear();auto parsed=ParseCatalog(raw);if(!parsed.empty()){if(network){auto temp=path;temp+=".tmp";{std::ofstream file(temp,std::ios::binary|std::ios::trunc);file.write(raw.data(),static_cast<std::streamsize>(raw.size()));file.flush();if(!file){Log("Catalog cache write failed");}}std::error_code ec;std::filesystem::rename(temp,path,ec);if(ec){std::filesystem::remove(path,ec);ec.clear();std::filesystem::rename(temp,path,ec);if(ec)Log("Catalog cache replace failed: "+ec.message());}}artworkRequested.clear();imageUuid.clear();imageAttempted=false;std::unordered_set<std::string> favorite,applied;for(auto& old:skins){if(old.favorite)favorite.insert(old.uuid);if(old.applied)applied.insert(old.uuid);}skins=std::move(parsed);for(auto& skin:skins){skin.favorite=favorite.contains(skin.uuid);skin.applied=applied.contains(skin.uuid);}selected=0;
  if(!selectedUuid.empty())for(int i=0;i<(int)skins.size();++i)if(skins[i].uuid==selectedUuid){selected=i;break;}
- Log("Catalog loaded: "+std::to_string(skins.size())+" skins");}else Log("Using demo catalog; choose Refresh Catalog to download all public skins");}
+ Log("Catalog loaded: "+std::to_string(skins.size())+" skins");}else {Log("Catalog sync failed: "+(!downloadError.empty()?downloadError:(catalogError.empty()?"invalid or empty catalog JSON":catalogError)));Notify("Catalog sync failed - see Logs");}}
  void Log(std::string s){logs.push_back(std::move(s));if(logs.size()>150)logs.erase(logs.begin());}
  void Notify(std::string s){toast=s;toastTimer=3;Log(s);}
  void Load(){std::ifstream f(ConfigPath());if(!f)return;try{auto j=json::parse(f);vsync=j.value("vsync",true);scale=j.value("scale",1.f);selected=std::clamp(j.value("selected",0),0,std::max(0,(int)skins.size()-1));selectedUuid=j.value("selectedUuid",std::string());
@@ -102,17 +125,79 @@ struct App {
  if(view){if(textures.size()>=32){for(auto& item:textures)if(item.second)item.second->Release();textures.clear();}textures[skin.uuid]=view;}
  }
  void Preview(){if(skins.empty()){ImGui::TextDisabled("No skins available");return;}auto& s=skins[selected];ImGui::BeginChild("Preview",ImVec2(0,245),ImGuiChildFlags_Borders);ImVec2 pos=ImGui::GetCursorScreenPos();ImVec2 avail=ImGui::GetContentRegionAvail();auto* dl=ImGui::GetWindowDrawList();ImVec2 a(pos.x+avail.x*.12f,pos.y+100),b(pos.x+avail.x*.88f,pos.y+155);dl->AddLine(a,b,IM_COL32(255,70,85,230),16);dl->AddLine(ImVec2(a.x+25,a.y-19),ImVec2(b.x-30,b.y-19),IM_COL32(220,224,233,220),5);dl->AddCircleFilled(ImVec2(b.x,b.y),14,IM_COL32(255,70,85,255));dl->AddText(ImVec2(pos.x+15,pos.y+14),IM_COL32(255,255,255,255),(s.weapon+" / "+s.name).c_str());dl->AddText(ImVec2(pos.x+15,pos.y+38),IM_COL32(180,185,195,255),("Variant: "+s.variant+" | Level: "+std::to_string(s.level)).c_str());if(!s.uuid.empty() && !s.image.empty()){
+ RequestArtwork(s);
  auto it=textures.find(s.uuid);
  if(it!=textures.end()){
  ImGui::SetCursorScreenPos(ImVec2(pos.x+20,pos.y+58));
- ImGui::Image((ImTextureID)it->second,ImVec2(std::max(120.f,avail.x-40),135));
+ float maxW=std::max(80.f,avail.x-40.f), maxH=135.f;
+ ID3D11Resource* resource=nullptr;it->second->GetResource(&resource);
+ float imageW=maxW,imageH=maxH;
+ if(resource){ID3D11Texture2D* tex=nullptr;if(SUCCEEDED(resource->QueryInterface(IID_PPV_ARGS(&tex)))){D3D11_TEXTURE2D_DESC d={};tex->GetDesc(&d);if(d.Width&&d.Height){float factor=std::min(maxW/(float)d.Width,maxH/(float)d.Height);imageW=d.Width*factor;imageH=d.Height*factor;}tex->Release();}resource->Release();}
+ ImGui::SetCursorPosX(ImGui::GetCursorPosX()+std::max(0.f,(maxW-imageW)*.5f));
+ ImGui::Image((ImTextureID)it->second,ImVec2(imageW,imageH));
  }else{ImGui::Dummy(ImVec2(1,165));ImGui::TextDisabled("Artwork not loaded - click Load artwork");}
- }else{ImGui::Dummy(ImVec2(1,165));ImGui::TextDisabled("No official artwork in demo catalog");}
- ImGui::TextDisabled("Public artwork preview only; does not alter the game");ImGui::EndChild();}
- void Catalog(bool onlyFav=false){ImGui::InputTextWithHint("##search","Search skins...",search,sizeof(search));ImGui::SameLine();ImGui::SetNextItemWidth(165);if(ImGui::BeginCombo("##weapon",weapons[weaponFilter].c_str())){for(int i=0;i<(int)weapons.size();++i)if(ImGui::Selectable(weapons[i].c_str(),weaponFilter==i))weaponFilter=i;ImGui::EndCombo();}ImGui::Separator();ImGui::BeginChild("catalog",ImVec2(0,0));int count=0;for(int i=0;i<(int)skins.size();++i){auto& s=skins[i];if(onlyFav&&!s.favorite)continue;if(weaponFilter&&s.weapon!=weapons[weaponFilter])continue;std::string hay=s.name+" "+s.weapon+" "+s.collection;std::string needle=search;std::transform(hay.begin(),hay.end(),hay.begin(),[](unsigned char c){return (char)std::tolower(c);});std::transform(needle.begin(),needle.end(),needle.begin(),[](unsigned char c){return (char)std::tolower(c);});if(hay.find(needle)==std::string::npos)continue;ImGui::PushID(i);ImGui::BeginChild("tile",ImVec2(0,110),ImGuiChildFlags_Borders);ImGui::TextColored(ImVec4(1,.275f,.333f,1),"%s",s.weapon.c_str());ImGui::SameLine();ImGui::Text("%s",s.name.c_str());ImGui::TextDisabled("Collection: %s | Variant: %s | Level %d",s.collection.c_str(),s.variant.c_str(),s.level);if(ImGui::Button(selected==i?"Selected":"Select")){selected=i;selectedUuid=s.uuid;Notify("Selected "+s.name);Save();}ImGui::SameLine();if(ImGui::Button(s.favorite?"Unfavorite":"Favorite")){s.favorite=!s.favorite;Save();}ImGui::EndChild();ImGui::PopID();++count;}if(!count)ImGui::TextDisabled("No skins match the filters.");ImGui::EndChild();}
+ }else{ImGui::Dummy(ImVec2(1,165));ImGui::TextDisabled("Sync catalog from Dashboard to load official artwork");}
+ ImGui::TextDisabled("Local preview only - no game changes");ImGui::EndChild();}
+ void Catalog(bool onlyFav=false){
+ if(!skins.empty()&&skins[0].uuid.empty()){
+ ImGui::TextColored(ImVec4(1.f,.65f,.35f,1.f),"Demo catalog has no images. Download official skin catalog:");
+ ImGui::SameLine();
+ if(ImGui::Button("Load official skins + images")){RefreshCatalog(true);Notify("Catalog: "+std::to_string(skins.size())+" skins. Check Logs if still in demo mode.");}
+ ImGui::Separator();
+ }
+ ImGui::TextColored(ImVec4(1,.275f,.333f,1),"WEAPON COLLECTION");
+ ImGui::SameLine();ImGui::TextDisabled("%d skins available",(int)skins.size());
+ ImGui::SetNextItemWidth(std::max(180.f,ImGui::GetContentRegionAvail().x*.53f));
+ ImGui::InputTextWithHint("##search","Search skin or collection...",search,sizeof(search));
+ ImGui::SameLine();ImGui::SetNextItemWidth(std::max(125.f,ImGui::GetContentRegionAvail().x*.32f));
+ if(ImGui::BeginCombo("##weapon",weapons[weaponFilter].c_str())){for(int i=0;i<(int)weapons.size();++i)if(ImGui::Selectable(weapons[i].c_str(),weaponFilter==i))weaponFilter=i;ImGui::EndCombo();}
+ ImGui::Separator();
+ ImGui::BeginChild("gallery",ImVec2(0,0));
+ FlushArtwork();
+ const float available=ImGui::GetContentRegionAvail().x;
+ const int columns=std::clamp((int)(available/275.f),1,4);
+ const float gap=12.f;
+ const float tileWidth=std::max(170.f,(available-(columns-1)*gap-18.f)/columns);
+ int count=0;
+ for(int i=0;i<(int)skins.size();++i){
+ auto& s=skins[i];if(onlyFav&&!s.favorite)continue;
+ if(weaponFilter&&s.weapon!=weapons[weaponFilter])continue;
+ std::string hay=s.name+" "+s.weapon+" "+s.collection,needle=search;
+ std::transform(hay.begin(),hay.end(),hay.begin(),[](unsigned char c){return (char)std::tolower(c);});
+ std::transform(needle.begin(),needle.end(),needle.begin(),[](unsigned char c){return (char)std::tolower(c);});
+ if(hay.find(needle)==std::string::npos)continue;
+ if(count%columns)ImGui::SameLine(0,gap);
+ ImGui::PushID(i);
+ ImGui::BeginChild("skin-card",ImVec2(tileWidth,245.f),ImGuiChildFlags_Borders);
+ ImGui::TextColored(ImVec4(1,.275f,.333f,1),"%s",s.weapon.c_str());
+ ImGui::SameLine();
+ ImGui::TextDisabled("%s",s.applied?"APPLIED":"PREVIEW");
+ ImGui::BeginChild("artwork",ImVec2(0,116.f),ImGuiChildFlags_Borders);
+ if(count<12)RequestArtwork(s);
+ auto it=textures.find(s.uuid);
+ if(it!=textures.end()){
+ ImGui::Image((ImTextureID)it->second,ImVec2(std::max(80.f,ImGui::GetContentRegionAvail().x),92.f));
+ }else{
+ ImGui::Dummy(ImVec2(1,24));
+ ImGui::TextDisabled(s.uuid.empty()?"Demo artwork unavailable":"Loading artwork...");
+ if(s.uuid.empty())ImGui::TextDisabled("Demo catalog");
+ }
+ ImGui::EndChild();
+ ImGui::TextWrapped("%s",s.name.c_str());
+ ImGui::TextDisabled("Level %d / %d",s.level,s.maxLevel);
+ if(ImGui::Button(selected==i?"Selected":"Preview",ImVec2(tileWidth*.49f-12,29))){
+ selected=i;selectedUuid=s.uuid;imageAttempted=false;LoadPreviewImage();Notify("Preview: "+s.name);Save();
+ }
+ ImGui::SameLine();
+ if(ImGui::Button(s.favorite?"Unfavorite":"Favorite",ImVec2(tileWidth*.49f-12,29))){s.favorite=!s.favorite;Save();}
+ ImGui::EndChild();ImGui::PopID();++count;
+ }
+ if(!count)ImGui::TextDisabled("No skins match these filters. Sync the catalog from Dashboard.");
+ ImGui::EndChild();
+ }
  void Dashboard(){ImGui::Text("WELCOME TO VSKIN PREMIUM");ImGui::TextDisabled("Standalone cosmetic catalog and collection manager");if(ImGui::Button("Sync complete skin catalog")){RefreshCatalog(true);Notify("Catalog currently contains "+std::to_string(skins.size())+" skins (check logs for cache/failure)");}ImGui::Spacing();int fav=0;for(auto& s:skins)fav+=s.favorite;float w=ImGui::GetContentRegionAvail().x;ImGui::Columns(2,nullptr,false);Card("CATALOG",std::to_string(skins.size())+" skins");Card("SELECTED",skins.empty()?"None":skins[selected].weapon);ImGui::NextColumn();Card("FAVORITES",std::to_string(fav));Card("RENDERER","DirectX 11");ImGui::Columns(1);ImGui::Separator();ImGui::Text("Skin distribution");for(size_t i=1;i<weapons.size();++i){int n=0;for(auto& s:skins)n+=s.weapon==weapons[i];ImGui::Text("%s",weapons[i].c_str());ImGui::SameLine(115);ImGui::ProgressBar(skins.empty()?0.f:(float)n/(float)skins.size(),ImVec2(std::max(100.f,w-140),10),"");} }
- void Detail(){if(skins.empty())return; if(ImGui::Button("Load official artwork"))LoadPreviewImage(); Preview();auto& s=skins[selected];ImGui::Text("Collection: %s",s.collection.c_str());int v=0;for(int i=0;i<(int)s.variants.size();i++)if(s.variant==s.variants[i])v=i;if(ImGui::BeginCombo("Variant",s.variant.c_str())){for(int i=0;i<(int)s.variants.size();i++)if(ImGui::Selectable(s.variants[i].c_str(),v==i)){s.variant=s.variants[i];Save();}ImGui::EndCombo();}if(ImGui::SliderInt("Evolution level",&s.level,1,s.maxLevel))Save();if(ImGui::Button("Apply Skin to Local Collection",ImVec2(-1,38))){for(auto& other:skins)if(other.weapon==s.weapon)other.applied=false;s.applied=true;Notify("Applied to local collection: "+s.name);Save();}ImGui::TextDisabled("No game process, account or inventory is modified.");}
+ void Detail(){if(skins.empty())return; if(ImGui::Button("Load official artwork"))LoadPreviewImage(); ImGui::SameLine();ImGui::TextDisabled("Preview mode - no in-game changes"); Preview();auto& s=skins[selected];ImGui::Text("Collection: %s",s.collection.c_str());int v=0;for(int i=0;i<(int)s.variants.size();i++)if(s.variant==s.variants[i])v=i;if(ImGui::BeginCombo("Variant",s.variant.c_str())){for(int i=0;i<(int)s.variants.size();i++)if(ImGui::Selectable(s.variants[i].c_str(),v==i)){s.variant=s.variants[i];Save();}ImGui::EndCombo();}if(ImGui::SliderInt("Evolution level",&s.level,1,s.maxLevel))Save();if(ImGui::Button("Apply Skin to Local Collection",ImVec2(-1,38))){for(auto& other:skins)if(other.weapon==s.weapon)other.applied=false;s.applied=true;Notify("Applied to local collection: "+s.name);Save();}ImGui::TextDisabled("Local collection only. No game process, account or inventory is modified.");}
  void Settings(){ImGui::Text("Preferences");if(ImGui::Checkbox("VSync",&vsync))Save();if(ImGui::SliderFloat("UI scale",&scale,.8f,1.5f,"%.2fx"))Save();ImGui::TextDisabled("Settings saved in AppData / VSkinPremium");ImGui::TextDisabled("Catalog is public; ownership and premium availability are not verified.");if(ImGui::Button("Refresh complete catalog (internet required)")){RefreshCatalog(true);Notify("Catalog currently contains "+std::to_string(skins.size())+" skins");}if(ImGui::Button("Reset settings")){vsync=true;scale=1;Save();Notify("Settings reset");}}
- void Draw(){Theme();ImGui::GetIO().FontGlobalScale=scale;ImGui::SetNextWindowPos(ImVec2(0,0));ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);ImGui::Begin("VSkin",nullptr,ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoSavedSettings);ImGui::TextColored(ImVec4(1,.275f,.333f,1),"VSKIN PREMIUM");ImGui::SameLine();ImGui::TextDisabled("v1.0 | LOCAL MODE | DX11 READY");ImGui::Separator();ImGui::BeginChild("sidebar",ImVec2(178,0),ImGuiChildFlags_Borders);for(const char* p:{"Dashboard","Skin Changer","Weapons","Collection","Favorites","Settings","Logs"}){bool active=page==p;if(ImGui::Selectable(p,active,0,ImVec2(0,37))){page=p;transition=0;}}ImGui::EndChild();ImGui::SameLine();ImGui::BeginChild("content",ImVec2(0,0));ImGui::SetWindowFontScale(1.25f);ImGui::Text("%s",page.c_str());ImGui::SetWindowFontScale(1);ImGui::Separator();if(page=="Dashboard")Dashboard();else if(page=="Skin Changer"){Detail();}else if(page=="Weapons")Catalog();else if(page=="Collection"){ImGui::TextDisabled("Locally applied skins");ImGui::BeginChild("localCollection");for(auto& skin:skins)if(skin.applied)ImGui::BulletText("%s - %s",skin.weapon.c_str(),skin.name.c_str());ImGui::EndChild();}else if(page=="Favorites")Catalog(true);else if(page=="Settings")Settings();else if(page=="Logs"){for(auto& l:logs)ImGui::BulletText("%s",l.c_str());}ImGui::EndChild();if(toastTimer>0){toastTimer-=ImGui::GetIO().DeltaTime;ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x-340,55));ImGui::SetNextWindowBgAlpha(.93f);ImGui::Begin("##toast",nullptr,ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoInputs);ImGui::Text("%s",toast.c_str());ImGui::End();}ImGui::End();}
+ void Draw(){Theme();ImGui::GetIO().FontGlobalScale=scale;ImGui::SetNextWindowPos(ImVec2(0,0));ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);ImGui::Begin("VSkin",nullptr,ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoSavedSettings);ImGui::TextColored(ImVec4(1,.275f,.333f,1),"VSKIN PREMIUM");ImGui::SameLine();ImGui::TextDisabled("v1.0 | LOCAL MODE | DX11 READY");ImGui::Separator();float sidebarWidth=std::clamp(ImGui::GetContentRegionAvail().x*.19f,160.f,220.f);ImGui::BeginChild("sidebar",ImVec2(sidebarWidth,0),ImGuiChildFlags_Borders);for(const char* p:{"Dashboard","Skin Changer","Weapons","Collection","Favorites","Settings","Logs"}){bool active=page==p;if(ImGui::Selectable(p,active,0,ImVec2(0,37))){page=p;transition=0;}}ImGui::EndChild();ImGui::SameLine();ImGui::BeginChild("content",ImVec2(0,0),ImGuiChildFlags_Borders);ImGui::SetWindowFontScale(1.25f);ImGui::Text("%s",page.c_str());ImGui::SetWindowFontScale(1);ImGui::Separator();if(page=="Dashboard")Dashboard();else if(page=="Skin Changer"){Catalog();}else if(page=="Weapons")Catalog();else if(page=="Collection"){ImGui::TextDisabled("Locally applied skins");ImGui::BeginChild("localCollection");for(auto& skin:skins)if(skin.applied)ImGui::BulletText("%s - %s",skin.weapon.c_str(),skin.name.c_str());ImGui::EndChild();}else if(page=="Favorites")Catalog(true);else if(page=="Settings")Settings();else if(page=="Logs"){for(auto& l:logs)ImGui::BulletText("%s",l.c_str());}ImGui::EndChild();if(toastTimer>0){toastTimer-=ImGui::GetIO().DeltaTime;ImGui::SetNextWindowPos(ImVec2(std::max(10.f,ImGui::GetIO().DisplaySize.x-340.f),55));ImGui::SetNextWindowBgAlpha(.93f);ImGui::Begin("##toast",nullptr,ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoInputs);ImGui::Text("%s",toast.c_str());ImGui::End();}ImGui::End();}
 };
 int WINAPI WinMain(HINSTANCE h,HINSTANCE,LPSTR,int){CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);WNDCLASSEXW wc={sizeof(wc),CS_CLASSDC,WndProc,0,0,h,nullptr,nullptr,nullptr,nullptr,L"VSkinPremium",nullptr};RegisterClassExW(&wc);HWND hwnd=CreateWindowExW(0,wc.lpszClassName,L"VSkin Premium - Standalone",WS_OVERLAPPEDWINDOW,100,100,1160,780,nullptr,nullptr,h,nullptr);if(!InitD3D(hwnd)){DestroyWindow(hwnd);UnregisterClassW(wc.lpszClassName,h);return 1;}ShowWindow(hwnd,SW_SHOWDEFAULT);UpdateWindow(hwnd);IMGUI_CHECKVERSION();ImGui::CreateContext();ImGui::StyleColorsDark();ImGui_ImplWin32_Init(hwnd);ImGui_ImplDX11_Init(device,context);App app;MSG msg={};while(msg.message!=WM_QUIT){if(PeekMessage(&msg,nullptr,0,0,PM_REMOVE)){TranslateMessage(&msg);DispatchMessage(&msg);continue;}ImGui_ImplDX11_NewFrame();ImGui_ImplWin32_NewFrame();ImGui::NewFrame();app.Draw();ImGui::Render();const float clear[4]={.051f,.059f,.078f,1};context->OMSetRenderTargets(1,&target,nullptr);context->ClearRenderTargetView(target,clear);ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());swapchain->Present(app.vsync?1:0,0);}app.Save();ImGui_ImplDX11_Shutdown();ImGui_ImplWin32_Shutdown();ImGui::DestroyContext();CleanupTarget();for(auto& [id,view]:textures)if(view)view->Release();swapchain->Release();context->Release();device->Release();DestroyWindow(hwnd);UnregisterClassW(wc.lpszClassName,h);CoUninitialize();return 0;}
