@@ -115,6 +115,12 @@ struct App {
  }else{ImGui::Dummy(ImVec2(1,165));ImGui::TextDisabled("Sync catalog from Dashboard to load official artwork");}
  ImGui::TextDisabled("Local preview only - no game changes");ImGui::EndChild();}
  void Catalog(bool onlyFav=false){
+ if(!skins.empty()&&skins[0].uuid.empty()){
+ ImGui::TextColored(ImVec4(1.f,.65f,.35f,1.f),"Demo catalog has no images. Download official skin catalog:");
+ ImGui::SameLine();
+ if(ImGui::Button("Load official skins + images")){RefreshCatalog(true);Notify("Catalog: "+std::to_string(skins.size())+" skins. Check Logs if still in demo mode.");}
+ ImGui::Separator();
+ }
  ImGui::TextColored(ImVec4(1,.275f,.333f,1),"WEAPON COLLECTION");
  ImGui::SameLine();ImGui::TextDisabled("%d skins available",(int)skins.size());
  ImGui::SetNextItemWidth(std::max(180.f,ImGui::GetContentRegionAvail().x*.53f));
