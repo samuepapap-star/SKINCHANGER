@@ -120,7 +120,7 @@ struct App {
  if(view){if(textures.size()>=32){for(auto& item:textures)if(item.second)item.second->Release();textures.clear();}textures[skin.uuid]=view;}
  }
  void Preview(){if(skins.empty()){ImGui::TextDisabled("No skins available");return;}auto& s=skins[selected];ImGui::BeginChild("Preview",ImVec2(0,245),ImGuiChildFlags_Borders);ImVec2 pos=ImGui::GetCursorScreenPos();ImVec2 avail=ImGui::GetContentRegionAvail();auto* dl=ImGui::GetWindowDrawList();ImVec2 a(pos.x+avail.x*.12f,pos.y+100),b(pos.x+avail.x*.88f,pos.y+155);dl->AddLine(a,b,IM_COL32(255,70,85,230),16);dl->AddLine(ImVec2(a.x+25,a.y-19),ImVec2(b.x-30,b.y-19),IM_COL32(220,224,233,220),5);dl->AddCircleFilled(ImVec2(b.x,b.y),14,IM_COL32(255,70,85,255));dl->AddText(ImVec2(pos.x+15,pos.y+14),IM_COL32(255,255,255,255),(s.weapon+" / "+s.name).c_str());dl->AddText(ImVec2(pos.x+15,pos.y+38),IM_COL32(180,185,195,255),("Variant: "+s.variant+" | Level: "+std::to_string(s.level)).c_str());if(!s.uuid.empty() && !s.image.empty()){
- if(count<12)RequestArtwork(s);
+ RequestArtwork(s);
  auto it=textures.find(s.uuid);
  if(it!=textures.end()){
  ImGui::SetCursorScreenPos(ImVec2(pos.x+20,pos.y+58));
@@ -168,6 +168,7 @@ struct App {
  ImGui::SameLine();
  ImGui::TextDisabled("%s",s.applied?"APPLIED":"PREVIEW");
  ImGui::BeginChild("artwork",ImVec2(0,116.f),ImGuiChildFlags_Borders);
+ if(count<12)RequestArtwork(s);
  auto it=textures.find(s.uuid);
  if(it!=textures.end()){
  ImGui::Image((ImTextureID)it->second,ImVec2(std::max(80.f,ImGui::GetContentRegionAvail().x),92.f));
