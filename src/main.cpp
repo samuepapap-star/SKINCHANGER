@@ -29,7 +29,8 @@
 #pragma comment(lib,"d3d11.lib")
 using json=nlohmann::json;
 struct Skin {std::string weapon,name,collection,variant; int level=1; bool favorite=false; std::string uuid,image; std::vector<std::string> variants; int maxLevel=1; bool applied=false;};
-static std::string FetchCatalog(){std::string out; HINTERNET session=WinHttpOpen(L"VSkinPremium/2.0",WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,WINHTTP_NO_PROXY_NAME,WINHTTP_NO_PROXY_BYPASS,0);if(!session)return out; HINTERNET connect=WinHttpConnect(session,L"valorant-api.com",INTERNET_DEFAULT_HTTPS_PORT,0);if(connect){HINTERNET request=WinHttpOpenRequest(connect,L"GET",L"/v1/weapons?language=en-US",nullptr,WINHTTP_NO_REFERER,WINHTTP_DEFAULT_ACCEPT_TYPES,WINHTTP_FLAG_SECURE);if(request){DWORD timeout=10000;WinHttpSetTimeouts(request,timeout,timeout,timeout,timeout);if(WinHttpSendRequest(request,WINHTTP_NO_ADDITIONAL_HEADERS,0,WINHTTP_NO_REQUEST_DATA,0,0,0)&&WinHttpReceiveResponse(request,nullptr)){DWORD status=0,len=sizeof(status);WinHttpQueryHeaders(request,WINHTTP_QUERY_STATUS_CODE|WINHTTP_QUERY_FLAG_NUMBER,WINHTTP_HEADER_NAME_BY_INDEX,&status,&len,WINHTTP_NO_HEADER_INDEX);if(status==200){char buffer[8192];DWORD read=0;while(WinHttpReadData(request,buffer,sizeof(buffer),&read)&&read){if(out.size()+read>12*1024*1024){out.clear();break;}out.append(buffer,read);}}}WinHttpCloseHandle(request);}WinHttpCloseHandle(connect);}WinHttpCloseHandle(session);return out;}
+static std::string catalogError;
+static std::string FetchCatalog(){catalogError="Catalog download failed";std::string out; HINTERNET session=WinHttpOpen(L"VSkinPremium/2.0",WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,WINHTTP_NO_PROXY_NAME,WINHTTP_NO_PROXY_BYPASS,0);if(!session){catalogError="WinHttpOpen error "+std::to_string(GetLastError());return out;} HINTERNET connect=WinHttpConnect(session,L"valorant-api.com",INTERNET_DEFAULT_HTTPS_PORT,0);if(connect){HINTERNET request=WinHttpOpenRequest(connect,L"GET",L"/v1/weapons?language=en-US",nullptr,WINHTTP_NO_REFERER,WINHTTP_DEFAULT_ACCEPT_TYPES,WINHTTP_FLAG_SECURE);if(request){DWORD timeout=10000;WinHttpSetTimeouts(request,timeout,timeout,timeout,timeout);if(WinHttpSendRequest(request,WINHTTP_NO_ADDITIONAL_HEADERS,0,WINHTTP_NO_REQUEST_DATA,0,0,0)&&WinHttpReceiveResponse(request,nullptr)){DWORD status=0,len=sizeof(status);WinHttpQueryHeaders(request,WINHTTP_QUERY_STATUS_CODE|WINHTTP_QUERY_FLAG_NUMBER,WINHTTP_HEADER_NAME_BY_INDEX,&status,&len,WINHTTP_NO_HEADER_INDEX);if(status!=200)catalogError="Catalog HTTP "+std::to_string(status);if(status==200){char buffer[8192];DWORD read=0;while(WinHttpReadData(request,buffer,sizeof(buffer),&read)&&read){if(out.size()+read>32*1024*1024){out.clear();catalogError="Catalog exceeds 32 MB";break;}out.append(buffer,read);}}else if(catalogError=="Catalog download failed")catalogError="WinHTTP request error "+std::to_string(GetLastError());}else catalogError="WinHTTP send/receive error "+std::to_string(GetLastError());WinHttpCloseHandle(request);}else catalogError="WinHttpOpenRequest error "+std::to_string(GetLastError());WinHttpCloseHandle(connect);}else catalogError="WinHttpConnect error "+std::to_string(GetLastError());WinHttpCloseHandle(session);if(!out.empty())catalogError.clear();return out;}
 static std::vector<Skin> ParseCatalog(const std::string& raw){std::vector<Skin> result;try{auto root=json::parse(raw);if(!root.contains("data")||!root["data"].is_array())return result;for(const auto& w:root["data"]){if(!w.is_object())continue;std::string weapon=w.value("displayName",std::string());if(weapon=="Melee")weapon="Melee";if(!w.contains("skins")||!w["skins"].is_array())continue;for(const auto& item:w["skins"]){if(!item.is_object())continue;Skin skin;skin.weapon=weapon;skin.name=item.value("displayName",std::string());skin.uuid=item.value("uuid",std::string());skin.image=item.value("displayIcon",std::string());skin.collection=skin.name;skin.variant="Default";if(item.contains("chromas")&&item["chromas"].is_array()){for(const auto& chroma:item["chromas"]){if(chroma.is_object())skin.variants.push_back(chroma.value("displayName",std::string("Default")));}}if(skin.variants.empty())skin.variants.push_back("Default");if(item.contains("levels")&&item["levels"].is_array())skin.maxLevel=std::max(1,(int)item["levels"].size());if(!skin.uuid.empty()&&!skin.name.empty()){
  auto pos=skin.name.rfind(' ' + weapon);
  if(pos!=std::string::npos && pos>0) skin.collection=skin.name.substr(0,pos);
@@ -52,6 +53,23 @@ static std::vector<unsigned char> FetchImage(const std::string& url){
  WinHttpCloseHandle(r);}WinHttpCloseHandle(c);}WinHttpCloseHandle(h);return bytes;
 }
 static std::unordered_map<std::string,ID3D11ShaderResourceView*> textures;
+static std::mutex artworkMutex;
+static std::vector<std::pair<std::string,std::vector<unsigned char>>> artworkReady;
+static std::unordered_set<std::string> artworkRequested;
+static std::atomic<bool> artworkBusy{false};
+static void RequestArtwork(const Skin& skin){
+ if(skin.uuid.empty()||skin.image.empty()||textures.contains(skin.uuid)||artworkRequested.contains(skin.uuid)||artworkBusy.load())return;
+ artworkRequested.insert(skin.uuid);artworkBusy=true;
+ std::string id=skin.uuid,url=skin.image;
+ std::thread([id,url](){auto bytes=FetchImage(url);{std::lock_guard<std::mutex> lock(artworkMutex);artworkReady.emplace_back(id,std::move(bytes));}artworkBusy=false;}).detach();
+}
+static ID3D11ShaderResourceView* DecodeTexture(const std::vector<unsigned char>& data);
+static void FlushArtwork(){
+ std::vector<std::pair<std::string,std::vector<unsigned char>>> ready;
+ {std::lock_guard<std::mutex> lock(artworkMutex);ready.swap(artworkReady);}
+ for(auto& entry:ready){if(entry.second.empty())continue;auto* view=DecodeTexture(entry.second);if(view){if(textures.size()>=96){auto it=textures.begin();if(it->second)it->second->Release();textures.erase(it);}textures[entry.first]=view;}}
+}
+
 static ID3D11Device* device=nullptr; static ID3D11DeviceContext* context=nullptr; static IDXGISwapChain* swapchain=nullptr; static ID3D11RenderTargetView* target=nullptr;
 static ID3D11ShaderResourceView* DecodeTexture(const std::vector<unsigned char>& data){
  if(data.empty()||!device)return nullptr;
@@ -83,9 +101,9 @@ struct App {
  std::vector<Skin> skins;std::vector<std::string> logs;std::string page="Dashboard";std::string selectedUuid;char search[128]={};int weaponFilter=0;int selected=0;bool vsync=true;float scale=1.0f;float transition=0;std::string toast;float toastTimer=0;std::string imageUuid;bool imageAttempted=false;
  const std::vector<std::string> weapons={"All","Vandal","Phantom","Operator","Sheriff","Ghost","Classic","Spectre","Guardian","Bulldog","Melee","Ares","Odin","Marshal","Outlaw","Bucky","Judge","Frenzy","Stinger","Shorty"};
  App(){const std::vector<std::pair<std::string,std::string>> names={{"Vandal","Prime"},{"Vandal","Reaver"},{"Vandal","RGX 11z Pro"},{"Phantom","Oni"},{"Phantom","Spectrum"},{"Operator","Elderflame"},{"Sheriff","Ion"},{"Ghost","Sovereign"},{"Classic","Glitchpop"},{"Spectre","Protocol 781-A"},{"Guardian","Ruination"},{"Bulldog","Araxys"},{"Melee","Champions Blade"}};for(auto& [w,n]:names)skins.push_back({w,n,n,"Default",1,false});RefreshCatalog(false);Load();Log("Application initialized");}
- void RefreshCatalog(bool network){auto path=ConfigPath().parent_path()/"catalog-cache.json";std::string raw;if(network){raw=FetchCatalog();if(!raw.empty()){std::ofstream file(path,std::ios::binary);file<<raw;}}else{std::ifstream file(path,std::ios::binary);if(file)raw.assign(std::istreambuf_iterator<char>(file),{});}auto parsed=ParseCatalog(raw);if(!parsed.empty()){imageUuid.clear();imageAttempted=false;std::unordered_set<std::string> favorite,applied;for(auto& old:skins){if(old.favorite)favorite.insert(old.uuid);if(old.applied)applied.insert(old.uuid);}skins=std::move(parsed);for(auto& skin:skins){skin.favorite=favorite.contains(skin.uuid);skin.applied=applied.contains(skin.uuid);}selected=0;
+ void RefreshCatalog(bool network){auto path=ConfigPath().parent_path()/"catalog-cache.json";std::string raw;if(network){raw=FetchCatalog();if(!raw.empty()){std::ofstream file(path,std::ios::binary);file<<raw;}}else{std::ifstream file(path,std::ios::binary);if(file)raw.assign(std::istreambuf_iterator<char>(file),{});}auto parsed=ParseCatalog(raw);if(!parsed.empty()){artworkRequested.clear();imageUuid.clear();imageAttempted=false;std::unordered_set<std::string> favorite,applied;for(auto& old:skins){if(old.favorite)favorite.insert(old.uuid);if(old.applied)applied.insert(old.uuid);}skins=std::move(parsed);for(auto& skin:skins){skin.favorite=favorite.contains(skin.uuid);skin.applied=applied.contains(skin.uuid);}selected=0;
  if(!selectedUuid.empty())for(int i=0;i<(int)skins.size();++i)if(skins[i].uuid==selectedUuid){selected=i;break;}
- Log("Catalog loaded: "+std::to_string(skins.size())+" skins");}else Log("Using demo catalog; choose Refresh Catalog to download all public skins");}
+ Log("Catalog loaded: "+std::to_string(skins.size())+" skins");}else {Log("Catalog sync failed: "+(catalogError.empty()?"invalid or empty catalog JSON":catalogError));Notify("Catalog sync failed - see Logs");}}
  void Log(std::string s){logs.push_back(std::move(s));if(logs.size()>150)logs.erase(logs.begin());}
  void Notify(std::string s){toast=s;toastTimer=3;Log(s);}
  void Load(){std::ifstream f(ConfigPath());if(!f)return;try{auto j=json::parse(f);vsync=j.value("vsync",true);scale=j.value("scale",1.f);selected=std::clamp(j.value("selected",0),0,std::max(0,(int)skins.size()-1));selectedUuid=j.value("selectedUuid",std::string());
@@ -102,6 +120,7 @@ struct App {
  if(view){if(textures.size()>=32){for(auto& item:textures)if(item.second)item.second->Release();textures.clear();}textures[skin.uuid]=view;}
  }
  void Preview(){if(skins.empty()){ImGui::TextDisabled("No skins available");return;}auto& s=skins[selected];ImGui::BeginChild("Preview",ImVec2(0,245),ImGuiChildFlags_Borders);ImVec2 pos=ImGui::GetCursorScreenPos();ImVec2 avail=ImGui::GetContentRegionAvail();auto* dl=ImGui::GetWindowDrawList();ImVec2 a(pos.x+avail.x*.12f,pos.y+100),b(pos.x+avail.x*.88f,pos.y+155);dl->AddLine(a,b,IM_COL32(255,70,85,230),16);dl->AddLine(ImVec2(a.x+25,a.y-19),ImVec2(b.x-30,b.y-19),IM_COL32(220,224,233,220),5);dl->AddCircleFilled(ImVec2(b.x,b.y),14,IM_COL32(255,70,85,255));dl->AddText(ImVec2(pos.x+15,pos.y+14),IM_COL32(255,255,255,255),(s.weapon+" / "+s.name).c_str());dl->AddText(ImVec2(pos.x+15,pos.y+38),IM_COL32(180,185,195,255),("Variant: "+s.variant+" | Level: "+std::to_string(s.level)).c_str());if(!s.uuid.empty() && !s.image.empty()){
+ if(count<12)RequestArtwork(s);
  auto it=textures.find(s.uuid);
  if(it!=textures.end()){
  ImGui::SetCursorScreenPos(ImVec2(pos.x+20,pos.y+58));
@@ -129,6 +148,7 @@ struct App {
  if(ImGui::BeginCombo("##weapon",weapons[weaponFilter].c_str())){for(int i=0;i<(int)weapons.size();++i)if(ImGui::Selectable(weapons[i].c_str(),weaponFilter==i))weaponFilter=i;ImGui::EndCombo();}
  ImGui::Separator();
  ImGui::BeginChild("gallery",ImVec2(0,0));
+ FlushArtwork();
  const float available=ImGui::GetContentRegionAvail().x;
  const int columns=std::clamp((int)(available/275.f),1,4);
  const float gap=12.f;
@@ -153,7 +173,7 @@ struct App {
  ImGui::Image((ImTextureID)it->second,ImVec2(std::max(80.f,ImGui::GetContentRegionAvail().x),92.f));
  }else{
  ImGui::Dummy(ImVec2(1,24));
- ImGui::TextDisabled("Select to load artwork");
+ ImGui::TextDisabled(s.uuid.empty()?"Demo artwork unavailable":"Loading artwork...");
  if(s.uuid.empty())ImGui::TextDisabled("Demo catalog");
  }
  ImGui::EndChild();
